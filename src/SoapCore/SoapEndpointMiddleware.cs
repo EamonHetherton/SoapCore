@@ -9,6 +9,7 @@ using System.Runtime.CompilerServices;
 using System.ServiceModel;
 using System.ServiceModel.Channels;
 using System.Threading.Tasks;
+using System.Xml.Serialization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.DependencyInjection;
@@ -20,9 +21,10 @@ using SoapCore.ServiceModel;
 
 namespace SoapCore
 {
-	public class SoapEndpointMiddleware
+	public class SoapEndpointMiddleware<T_MESSAGE>
+		where T_MESSAGE : CustomMessage, new()
 	{
-		private readonly ILogger<SoapEndpointMiddleware> _logger;
+		private readonly ILogger<SoapEndpointMiddleware<T_MESSAGE>> _logger;
 		private readonly RequestDelegate _next;
 		private readonly SoapOptions _options;
 		private readonly ServiceDescription _service;
@@ -37,7 +39,7 @@ namespace SoapCore
 		private readonly SerializerHelper _serializerHelper;
 
 		[Obsolete]
-		public SoapEndpointMiddleware(ILogger<SoapEndpointMiddleware> logger, RequestDelegate next, Type serviceType, string path, SoapEncoderOptions[] encoderOptions, SoapSerializer serializer, bool caseInsensitivePath, ISoapModelBounder soapModelBounder, Binding binding, bool httpGetEnabled, bool httpsGetEnabled)
+		public SoapEndpointMiddleware(ILogger<SoapEndpointMiddleware<T_MESSAGE>> logger, RequestDelegate next, Type serviceType, string path, SoapEncoderOptions[] encoderOptions, SoapSerializer serializer, bool caseInsensitivePath, ISoapModelBounder soapModelBounder, Binding binding, bool httpGetEnabled, bool httpsGetEnabled)
 		{
 			_logger = logger;
 			_next = next;
@@ -59,7 +61,7 @@ namespace SoapCore
 			}
 		}
 
-		public SoapEndpointMiddleware(ILogger<SoapEndpointMiddleware> logger, RequestDelegate next, SoapOptions options)
+		public SoapEndpointMiddleware(ILogger<SoapEndpointMiddleware<T_MESSAGE>> logger, RequestDelegate next, SoapOptions options)
 		{
 			_logger = logger;
 			_next = next;
@@ -358,8 +360,12 @@ namespace SoapCore
 			if (_messageEncoders[0].MessageVersion.Addressing == AddressingVersion.WSAddressing10)
 			{
 				responseMessage = Message.CreateMessage(_messageEncoders[0].MessageVersion, soapAction, bodyWriter);
-				responseMessage = new CustomMessage(responseMessage);
-
+				T_MESSAGE customMessage = new T_MESSAGE
+				{
+					Message = responseMessage
+				};
+				responseMessage = customMessage;
+				//responseMessage.Message = responseMessage;
 				responseMessage.Headers.Action = operation.ReplyAction;
 				responseMessage.Headers.RelatesTo = requestMessage.Headers.MessageId;
 				responseMessage.Headers.To = requestMessage.Headers.ReplyTo?.Uri;
@@ -367,7 +373,11 @@ namespace SoapCore
 			else
 			{
 				responseMessage = Message.CreateMessage(_messageEncoders[0].MessageVersion, null, bodyWriter);
-				responseMessage = new CustomMessage(responseMessage);
+				T_MESSAGE customMessage = new T_MESSAGE
+				{
+					Message = responseMessage
+				};
+				responseMessage = customMessage;
 
 				if (responseObject != null)
 				{
@@ -492,8 +502,29 @@ namespace SoapCore
 
 				if (messageContractAttribute.IsWrapped && !parameterType.GetMembersWithAttribute<MessageHeaderAttribute>().Any())
 				{
-					// It's wrapped so we treat it like normal!
-					arguments[parameterInfo.Index] = _serializerHelper.DeserializeInputParameter(xmlReader, parameterInfo.Parameter.ParameterType, parameterInfo.Name, @namespace, parameterInfo);
+				https://github.com/DigDes/SoapCore/issues/385
+					if (operation.DispatchMethod.GetCustomAttribute<XmlSerializerFormatAttribute>()?.Style == OperationFormatStyle.Rpc)
+					{
+						var importer = new SoapReflectionImporter(@namespace);
+						var map = new XmlReflectionMember
+						{
+							IsReturnValue = false,
+							MemberName = parameterInfo.Name,
+							MemberType = parameterType
+						};
+						var mapping = importer.ImportMembersMapping(parameterInfo.Name, @namespace, new[] { map }, false, true);
+						var serializer = XmlSerializer.FromMappings(new[] { mapping })[0];
+						var value = serializer.Deserialize(xmlReader);
+						if (value is object[] o && o.Length > 0)
+						{
+							arguments[parameterInfo.Index] = o[0];
+						}
+					}
+					else
+					{
+						// It's wrapped so we treat it like normal!
+						arguments[parameterInfo.Index] = _serializerHelper.DeserializeInputParameter(xmlReader, parameterInfo.Parameter.ParameterType, parameterInfo.Name, @namespace, parameterInfo);
+					}
 				}
 				else
 				{
